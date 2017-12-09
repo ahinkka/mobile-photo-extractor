@@ -178,7 +178,10 @@ def handle_file(source_file, dest_dir, dry_run):
 
     log(u" => {}".format(dest))
     if not dry_run:
-        shutil.copyfile(source_file, dest)
+        if not os.path.isfile(dest) or \
+           os.path.getsize(source_file) != os.path.getsize(dest):
+            shutil.copyfile(source_file, dest)
+        shutil.copystat(source_file, dest)
 
 
 def handle_source(source, dest, dry_run):
