@@ -1,0 +1,224 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+#
+# Copyright 2017 Atte Hinkka
+#
+# This program is free software: you can redistribute it and/or
+# modify it under the terms of the GNU General Public License as
+# published by the Free Software Foundation, either version 3 of
+# the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public
+# License along with this program.  If not, see
+# <http://www.gnu.org/licenses/>.
+
+from __future__ import print_function
+
+import argparse
+import codecs
+import os
+import shutil
+import struct
+import sys
+import time
+
+import piexif
+
+from datetime import datetime
+
+
+class PathType(object):
+    '''Source: https://stackoverflow.com/a/33181083'''
+    def __init__(self, exists=True, type='file', dash_ok=True):
+        '''exists:
+                True: a path that does exist
+                False: a path that does not exist, in a valid parent directory
+                None: don't care
+           type: file, dir, symlink, None, or a function returning True for valid paths
+                None: don't care
+           dash_ok: whether to allow "-" as stdin/stdout'''
+
+        assert exists in (True, False, None)
+        assert type in ('file','dir','symlink',None) or hasattr(type,'__call__')
+
+        self._exists = exists
+        self._type = type
+        self._dash_ok = dash_ok
+
+    def __call__(self, string):
+        from argparse import ArgumentTypeError as err
+        if string=='-':
+            # the special argument "-" means sys.std{in,out}
+            if self._type == 'dir':
+                raise err('standard input/output (-) not allowed as directory path')
+            elif self._type == 'symlink':
+                raise err('standard input/output (-) not allowed as symlink path')
+            elif not self._dash_ok:
+                raise err('standard input/output (-) not allowed')
+        else:
+            from argparse import ArgumentTypeError as err
+            e = os.path.exists(string)
+            if self._exists==True:
+                if not e:
+                    raise err("path does not exist: '%s'" % string)
+
+                if self._type is None:
+                    pass
+                elif self._type=='file':
+                    if not os.path.isfile(string):
+                        raise err("path is not a file: '%s'" % string)
+                elif self._type=='symlink':
+                    if not os.path.symlink(string):
+                        raise err("path is not a symlink: '%s'" % string)
+                elif self._type=='dir':
+                    if not os.path.isdir(string):
+                        raise err("path is not a directory: '%s'" % string)
+                elif not self._type(string):
+                    raise err("path not valid: '%s'" % string)
+            else:
+                if self._exists==False and e:
+                    raise err("path exists: '%s'" % string)
+
+                p = os.path.dirname(os.path.normpath(string)) or '.'
+                if not os.path.isdir(p):
+                    raise err("parent path is not a directory: '%s'" % p)
+                elif not os.path.exists(p):
+                    raise err("parent directory does not exist: '%s'" % p)
+
+        return string
+
+
+def log(*args, **kwargs):
+    if 'file' not in kwargs:
+        kwargs['file'] = codecs.getwriter('utf8')(sys.stderr)
+    print(*args, **kwargs)
+
+
+def resolve_exif_ifd_date(exif):
+    if piexif.ExifIFD.DateTimeOriginal in exif.get('Exif', {}):
+        # log(exif['Exif'])
+        dt = exif['Exif'][piexif.ExifIFD.DateTimeOriginal]
+        offset = exif['Exif'].get(piexif.ExifIFD.OffsetTimeOriginal, 0)
+        return dt, offset
+
+
+def resolve_date(exif):
+    date = resolve_exif_ifd_date(exif)
+    return date
+
+    # piexif.ImageIFD.DateTime
+    # piexif.ImageIFD.TimeZoneOffset
+
+    # piexif.ExifIFD.DateTimeOriginal
+    # piexif.ExifIFD.DateTimeDigitized
+    # piexif.ExifIFD.OffsetTime
+    # piexif.ExifIFD.OffsetTimeOriginal
+    # piexif.ExifIFD.OffsetTimeDigitized
+
+    # piexif.GPSIFD.GPSTimeStamp
+    # piexif.GPSIFD.GPSDateStamp
+
+
+def handle_file(source_file, dest_dir, dry_run):
+    source_extension = source_file.split('.')[-1].lower()
+    if source_extension not in ['jpg', 'jpeg']:
+        # log(u'Likely not a photo, not handling.')
+        return
+
+    try:
+        exif_dict = piexif.load(source_file)
+    except struct.error, se:
+        # log(u"Couldn't read EXIF for file {}".format(source_file))
+        return
+    except piexif._exceptions.InvalidImageDataError, iide:
+        # log(u"Couldn't read EXIF for file {}".format(source_file))
+        return
+
+    date_and_offset = resolve_date(exif_dict)
+
+    if date_and_offset is None:
+        # log(u'No date for {}, skipping'.format(source_file))
+        return
+
+    log(u'{}'.format(source_file))
+    date, offset = date_and_offset
+
+    src_fmt = u'%Y:%m:%d %H:%M:%S' # 2011:09:29 18:54:40
+    dt = datetime.strptime(date, src_fmt)
+    # log(dt.year, dt.month)
+
+    source_filename = os.path.basename(source_file)
+    source_without_extension = u'.'.join(source_filename.split(u'.')[:-1])
+
+    year_dir = os.path.join(dest_dir, str(dt.year))
+    month_dir = os.path.join(year_dir, str(dt.month).rjust(2, '0'))
+    if not os.path.isdir(year_dir):
+        log(" mkdir {}".format(year_dir))
+        if not dry_run:
+            os.mkdir(year_dir)
+    if not os.path.isdir(month_dir):
+        log(" mkdir {}".format(month_dir))
+        if not dry_run:
+            os.mkdir(month_dir)
+
+    dest_fmt = '%Y-%m-%d-%H-%M-%S'
+    date_prefix = dt.strftime(dest_fmt)
+    if source_filename.startswith(date_prefix):
+        new_filename = source_filename
+    else:
+        new_filename = u'{}-{}'.format(dt.strftime(dest_fmt),
+                                     source_filename)
+
+    dest = os.path.join(month_dir, new_filename)
+
+    log(u" => {}".format(dest))
+    if not dry_run:
+        shutil.copyfile(source_file, dest)
+
+
+def handle_source(source, dest, dry_run):
+    for root, dirs, files in os.walk(source):
+        path = root.split(os.sep)
+        # print((len(path) - 1) * '---', os.path.basename(root))
+        for file in files:
+            handle_file(os.path.join(root, file), dest, dry_run)
+
+
+def main(sources, dest, dry_run):
+    if not dry_run:
+        log(u'This is not a dry run, files will be copied. Continuing in 3 seconds...')
+        for i in xrange(3, 0, -1):
+            log('{}'.format(i))
+            time.sleep(1)
+    elif dry_run:
+        log(u'This is dry run, nothing will actually be copied.')
+        time.sleep(1)
+
+    log(u'Extracting photos from {} and copying them to {}'
+        .format(', '.join(source_dirs), dest_dir))
+
+    for source in sources:
+        handle_source(source, dest, dry_run)
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('source_dir', help="directory to extract photos from",
+                        action='append', nargs='+', type=PathType(exists=True, type='dir'))
+    parser.add_argument('dest_dir', help="destination directory to drop photos to",
+                        type=PathType(exists=True, type='dir'))
+    parser.add_argument("--dry-run", action="store_true",
+                        help="don't actually extract copy anything around")
+
+    args = parser.parse_args()
+
+    source_dirs = args.source_dir[0]
+    dest_dir = args.dest_dir
+
+    main(source_dirs, dest_dir, args.dry_run)
